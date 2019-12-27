@@ -55,13 +55,16 @@ class AdditiveGridInterpolationVariationalStrategy(GridInterpolationVariationalS
         if num_dim != self.num_dim:
             raise RuntimeError("The number of dims should match the number specified.")
 
-        output = super().forward(x, inducing_points, inducing_values, variational_inducing_covar)
+        pred_output, map_output = super().forward(x, inducing_points, inducing_values, variational_inducing_covar)
         if self.sum_output:
             if variational_inducing_covar is not None:
-                mean = output.mean.sum(0)
-                covar = output.lazy_covariance_matrix.sum(-3)
-                return MultivariateNormal(mean, covar)
+                pred_covar = pred_output.lazy_covariance_matrix.sum(-3)
+                map_covar = map_output.lazy_covariance_matrix.sum(-3)
+                return (
+                    MultivariateNormal(pred_output.mean.sum(0), pred_covar),
+                    MultivariateNormal(map_output.mean.sum(0), map_covar),
+                )
             else:
-                return Delta(output.mean.sum(0))
+                return Delta(pred_output.mean.sum(0)), Delta(map_output.mean.sum(0))
         else:
-            return output
+            return pred_output, map_output

@@ -5,8 +5,7 @@ import warnings
 import torch
 
 from ..distributions import MultivariateNormal
-from ..lazy import DiagLazyTensor, MatmulLazyTensor, RootLazyTensor, SumLazyTensor, delazify
-from ..utils.cholesky import psd_safe_cholesky
+from ..lazy import DiagLazyTensor, MatmulLazyTensor, PsdSumLazyTensor, RootLazyTensor, SumLazyTensor
 from ..utils.memoize import cached
 from ._variational_strategy import _VariationalStrategy
 
@@ -67,11 +66,6 @@ class VariationalStrategy(_VariationalStrategy):
         self.register_buffer("updated_strategy", torch.tensor(True))
         self._register_load_state_dict_pre_hook(_ensure_updated_strategy_flag_set)
 
-    @cached(name="cholesky_factor")
-    def _cholesky_factor(self, induc_induc_covar):
-        L = psd_safe_cholesky(delazify(induc_induc_covar).double())
-        return L
-
     @property
     @cached(name="prior_distribution_memo")
     def prior_distribution(self):
@@ -111,16 +105,24 @@ class VariationalStrategy(_VariationalStrategy):
         # Compute the covariance of q(f)
         # K_XX + k_XZ K_ZZ^{-1/2} (S - I) K_ZZ^{-1/2} k_ZX
         middle_term = self.prior_distribution.lazy_covariance_matrix.mul(-1)
-        if variational_inducing_covar is not None:
-            middle_term = SumLazyTensor(variational_inducing_covar, middle_term)
         predictive_covar = SumLazyTensor(
-            data_data_covar.add_jitter(1e-4), MatmulLazyTensor(interp_term.transpose(-1, -2), middle_term @ interp_term)
+            data_data_covar.add_jitter(1e-4),
+            MatmulLazyTensor(interp_term.transpose(-1, -2), middle_term @ interp_term),
         )
+        pred_distribution_map = MultivariateNormal(predictive_mean, predictive_covar)
+        if variational_inducing_covar is None:
+            return pred_distribution_map
+        else:
+            pred_distribution = MultivariateNormal(
+                predictive_mean,
+                PsdSumLazyTensor(
+                    predictive_covar,
+                    MatmulLazyTensor(interp_term.transpose(-1, -2), variational_inducing_covar @ interp_term),
+                ),
+            )
+            return pred_distribution, pred_distribution_map
 
-        # Return the distribution
-        return MultivariateNormal(predictive_mean, predictive_covar)
-
-    def __call__(self, x, prior=False):
+    def __call__(self, x, prior=False, **kwargs):
         if not self.updated_strategy.item() and not prior:
             with torch.no_grad():
                 # Get unwhitened p(u)
@@ -162,4 +164,4 @@ class VariationalStrategy(_VariationalStrategy):
                 # Mark that we have updated the variational strategy
                 self.updated_strategy.fill_(True)
 
-        return super().__call__(x, prior=prior)
+        return super().__call__(x, prior=prior, **kwargs)
